@@ -13,7 +13,7 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v2
+    - uses: actions/checkout@v4
     - name: Install FUSE
       run: sudo apt install fuse libfuse-dev pkg-config -y
     - name: Build
@@ -27,21 +27,19 @@ jobs:
   clippy_check:
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v2
+    - uses: actions/checkout@v4
     - name: Install FUSE
       run: sudo apt install fuse libfuse-dev pkg-config -y
-    - uses: actions-rs/toolchain@v1
+    - uses: dtolnay/rust-toolchain@stable
       with:
         components: clippy
-    - uses: actions-rs/clippy-check@v1
-      with:
-        token: ${{ secrets.GITHUB_TOKEN }}
-        args: --all-features
+    - name: Run clippy
+      run: cargo clippy --all-features
   build-aarch64:
     name: Build (aarch64)
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v2
+    - uses: actions/checkout@v4
     - name: Install cross-compilation tools
       run: |
         sudo apt-get update

@@ -1,9 +1,9 @@
-use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::thread::JoinHandle;
 
 use anyhow::{anyhow, Result};
+use fuser::MountOption;
 use nix::mount::umount;
 use retry::delay::Fixed;
 use retry::{retry, OperationResult};
@@ -125,21 +125,22 @@ impl MountInjector {
         let cloned_hookfs = hookfs.clone();
 
         let (before_mount_waiter, before_mount_guard) = stop::lock();
-        let handler = std::thread::spawn(box move || {
+        let handler = std::thread::spawn(move || {
             let fs = hookfs::AsyncFileSystem::from(cloned_hookfs);
 
             std::fs::create_dir_all(new_path.as_path())?;
 
-            let args = ["allow_other", "fsname=toda", "default_permissions", "nonempty"];
-            let flags: Vec<_> = args
-                .iter()
-                .flat_map(|item| vec![OsStr::new("-o"), OsStr::new(item)])
-                .collect();
+            let options = vec![
+                MountOption::AllowOther,
+                MountOption::FSName("toda".to_string()),
+                MountOption::DefaultPermissions,
+                MountOption::CUSTOM("nonempty".to_string()),
+            ];
 
-            info!("mount with flags {:?}", flags);
+            info!("mount with options {:?}", options);
 
             drop(before_mount_guard);
-            fuser::mount(fs, &original_path, &flags)?;
+            fuser::mount2(fs, &original_path, &options)?;
 
             drop(hookfs::runtime::RUNTIME.write().unwrap().take().unwrap());
 

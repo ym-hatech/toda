@@ -49,7 +49,6 @@ pub fn convert_libc_stat_to_fuse_stat(stat: libc::stat) -> Result<FileAttr> {
         gid: stat.st_gid,
         rdev: stat.st_rdev as u32,
         blksize: stat.st_blksize as u32,
-        padding: 0,                // unknown attr
         crtime: system_time(0, 0), // It's macOS only
         flags: 0,                  // It's macOS only
     })

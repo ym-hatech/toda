@@ -1,6 +1,8 @@
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::ffi::CString;
+use std::io::IoSlice;
+#[cfg(target_arch = "aarch64")]
 use std::io;
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
@@ -9,10 +11,9 @@ use anyhow::{anyhow, Result};
 use nix::errno::Errno;
 use nix::sys::mman::{MapFlags, ProtFlags};
 use nix::sys::signal::Signal;
-use nix::sys::uio::{process_vm_writev, IoVec, RemoteIoVec};
+use nix::sys::uio::{process_vm_writev, RemoteIoVec};
 use nix::sys::{ptrace, wait};
 use nix::unistd::Pid;
-use nix::Error::Sys;
 use procfs::process::Task;
 use procfs::ProcError;
 use retry::delay::Fixed;
@@ -216,9 +217,9 @@ fn attach_task(task: &Task) -> Result<()> {
 
     trace!("attach task: {}", task.tid);
     match ptrace::attach(pid) {
-        Err(Sys(errno))
+        Err(errno)
             if errno == Errno::ESRCH
-                || (errno == Errno::EPERM && thread_is_gone(process.stat.state)) =>
+                || (errno == Errno::EPERM && thread_is_gone(process.stat().map(|s| s.state).unwrap_or('Z'))) =>
         {
             info!("task {} doesn't exist, maybe has stopped", task.tid)
         }
@@ -314,7 +315,7 @@ impl PtraceManager {
                                                 Ok(()) => {
                                                     info!("successfully detached task: {}", task.tid);
                                                 }
-                                                Err(Sys(Errno::ESRCH)) => trace!(
+                                                Err(Errno::ESRCH) => trace!(
                                                     "task {} doesn't exist, maybe has stopped or not traced",
                                                     task.tid
                                                 ),
@@ -405,13 +406,11 @@ impl TracedProcess {
 
             // Write the architecture-specific syscall instruction at the current
             // program counter so the traced thread executes exactly one syscall.
-            unsafe {
-                ptrace::write(
+            ptrace::write(
                     pid,
                     cur_ins_ptr as *mut libc::c_void,
-                    SYSCALL_INST as *mut libc::c_void,
-                )?
-            };
+                    SYSCALL_INST as libc::c_long,
+                )?;
             ptrace::step(pid, None)?;
 
             loop {
@@ -477,7 +476,7 @@ impl TracedProcess {
 
         process_vm_writev(
             pid,
-            &[IoVec::from_slice(content)],
+            &[IoSlice::new(content)],
             &[RemoteIoVec {
                 base: addr as usize,
                 len: content.len(),
@@ -558,14 +557,12 @@ struct ThreadGuard {
 impl Drop for ThreadGuard {
     fn drop(&mut self) {
         let pid = Pid::from_raw(self.tid);
-        unsafe {
-            ptrace::write(
+        ptrace::write(
                 pid,
                 get_pc(&self.regs) as *mut libc::c_void,
-                self.rip_ins as *mut libc::c_void,
+                self.rip_ins,
             )
             .unwrap();
-        }
         set_regs(pid, self.regs).unwrap();
     }
 }

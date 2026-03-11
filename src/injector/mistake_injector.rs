@@ -57,13 +57,13 @@ impl MistakeInjector {
         let mistake = &self.mistake;
         let occurrence = match mistake.max_occurrences {
             0 => 0,
-            mo => rng.gen_range(1, mo + 1),
+            mo => rng.gen_range(1..=mo),
         };
         for _ in 0..occurrence {
-            let pos = rng.gen_range(0, max(data_length, 1));
+            let pos = rng.gen_range(0..max(data_length, 1));
             let length = match min(mistake.max_length, data_length - pos) {
                 0 => 0,
-                l => rng.gen_range(1, l + 1),
+                l => rng.gen_range(1..=l),
             };
             debug!(
                 "Setting index [{},{}) to {:?}",

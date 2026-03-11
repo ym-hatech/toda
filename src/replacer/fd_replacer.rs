@@ -334,6 +334,7 @@ impl FdReplacer {
             })
             .flat_map(|(process, fd)| {
                 fd.into_iter()
+                    .filter_map(|r| r.ok())
                     .filter_map(|entry| match entry.target {
                         FDTarget::Path(path) => Some((entry.fd as u64, path)),
                         _ => None,
@@ -345,7 +346,7 @@ impl FdReplacer {
                         Some((process.clone(), (fd, new_path.join(stripped_path))))
                     })
             })
-            .group_by(|(process, _)| process.pid)
+            .chunk_by(|(process, _)| process.pid)
             .into_iter()
             .filter_map(|(pid, group)| Some((ptrace::trace(pid).ok()?, group)))
             .map(|(process, group)| (process, group.map(|(_, group)| group)))

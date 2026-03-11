@@ -8,7 +8,7 @@ use anyhow::{anyhow, Result};
 use dynasmrt::{dynasm, DynasmApi, DynasmLabelApi};
 use itertools::Itertools;
 use nix::sys::mman::{MapFlags, ProtFlags};
-use procfs::process::MMapPath;
+use procfs::process::{MMPermissions, MMapPath};
 use tracing::{error, info, trace};
 
 use super::utils::all_processes;
@@ -339,30 +339,24 @@ fn build_mmap_replace_code(
     Ok((replace.0 as u64, instructions))
 }
 
-fn get_prot_and_flags_from_perms<S: AsRef<str>>(perms: S) -> (u64, u64) {
-    let bytes = perms.as_ref().as_bytes();
+fn get_prot_and_flags_from_perms(perms: MMPermissions) -> (u64, u64) {
     let mut prot = ProtFlags::empty();
     let mut flags = MapFlags::MAP_PRIVATE;
 
-    if bytes[0] == b'r' {
+    if perms.contains(MMPermissions::READ) {
         prot |= ProtFlags::PROT_READ
     }
-    if bytes[1] == b'w' {
+    if perms.contains(MMPermissions::WRITE) {
         prot |= ProtFlags::PROT_WRITE
     }
-    if bytes[2] == b'x' {
+    if perms.contains(MMPermissions::EXECUTE) {
         prot |= ProtFlags::PROT_EXEC
     }
-    if bytes[3] == b's' {
+    if perms.contains(MMPermissions::SHARED) {
         flags = MapFlags::MAP_SHARED;
     }
 
-    trace!(
-        "perms: {}, prot: {:?}, flags: {:?}",
-        perms.as_ref(),
-        prot,
-        flags
-    );
+    trace!("prot: {:?}, flags: {:?}", prot, flags);
     (prot.bits() as u64, flags.bits() as u64)
 }
 
@@ -419,7 +413,7 @@ impl MmapReplacer {
                         Some((process, case))
                     })
             })
-            .group_by(|(process, _)| process.pid)
+            .chunk_by(|(process, _)| process.pid)
             .into_iter()
             .filter_map(|(pid, group)| Some((ptrace::trace(pid).ok()?, group)))
             .map(|(process, group)| (process, group.map(|(_, group)| group)))

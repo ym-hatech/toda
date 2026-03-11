@@ -7,7 +7,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use fuser::*;
 use tracing::trace_span;
-use tracing_futures::Instrument;
+use tracing::Instrument;
 
 use super::errors::Result;
 use super::reply::*;
@@ -230,7 +230,7 @@ impl<T: AsyncFileSystemImpl + 'static> Filesystem for AsyncFileSystem<T> {
         self.0.init().map_err(|err| err.into())
     }
 
-    fn destroy(&mut self, _req: &fuser::Request) {
+    fn destroy(&mut self) {
         self.0.destroy()
     }
 

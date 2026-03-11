@@ -1,6 +1,7 @@
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::ffi::CString;
+use std::io;
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 
@@ -19,6 +20,174 @@ use retry::Error::{self, Operation};
 use retry::OperationResult;
 use tracing::{error, info, instrument, trace, warn};
 use Error::Internal;
+
+// ---------------------------------------------------------------------------
+// Architecture-specific register access helpers
+// ---------------------------------------------------------------------------
+
+/// Retrieve the register set of a traced thread.
+///
+/// On x86-64 we use `nix::sys::ptrace::getregs` which is available directly.
+/// On aarch64 we fall back to the raw `PTRACE_GETREGSET` ptrace request with
+/// `NT_PRSTATUS` because nix 0.21 does not expose `getregs` for that target.
+#[cfg(target_arch = "x86_64")]
+fn get_regs(pid: Pid) -> Result<libc::user_regs_struct> {
+    Ok(ptrace::getregs(pid)?)
+}
+
+#[cfg(target_arch = "aarch64")]
+fn get_regs(pid: Pid) -> Result<libc::user_regs_struct> {
+    let mut regs: libc::user_regs_struct = unsafe { std::mem::zeroed() };
+    let mut iov = libc::iovec {
+        iov_base: &mut regs as *mut _ as *mut libc::c_void,
+        iov_len: std::mem::size_of::<libc::user_regs_struct>(),
+    };
+    let ret = unsafe {
+        libc::ptrace(
+            libc::PTRACE_GETREGSET as libc::c_int,
+            pid.as_raw(),
+            libc::NT_PRSTATUS as usize as *mut libc::c_void,
+            &mut iov as *mut libc::iovec as *mut libc::c_void,
+        )
+    };
+    if ret < 0 {
+        return Err(io::Error::last_os_error().into());
+    }
+    Ok(regs)
+}
+
+/// Write the register set back to a traced thread.
+#[cfg(target_arch = "x86_64")]
+fn set_regs(pid: Pid, regs: libc::user_regs_struct) -> Result<()> {
+    Ok(ptrace::setregs(pid, regs)?)
+}
+
+#[cfg(target_arch = "aarch64")]
+fn set_regs(pid: Pid, regs: libc::user_regs_struct) -> Result<()> {
+    let mut regs = regs;
+    let mut iov = libc::iovec {
+        iov_base: &mut regs as *mut _ as *mut libc::c_void,
+        iov_len: std::mem::size_of::<libc::user_regs_struct>(),
+    };
+    let ret = unsafe {
+        libc::ptrace(
+            libc::PTRACE_SETREGSET as libc::c_int,
+            pid.as_raw(),
+            libc::NT_PRSTATUS as usize as *mut libc::c_void,
+            &mut iov as *mut libc::iovec as *mut libc::c_void,
+        )
+    };
+    if ret < 0 {
+        return Err(io::Error::last_os_error().into());
+    }
+    Ok(())
+}
+
+/// Return the program counter (instruction pointer) from a register snapshot.
+#[cfg(target_arch = "x86_64")]
+#[inline]
+fn get_pc(regs: &libc::user_regs_struct) -> u64 {
+    regs.rip
+}
+
+#[cfg(target_arch = "aarch64")]
+#[inline]
+fn get_pc(regs: &libc::user_regs_struct) -> u64 {
+    regs.pc
+}
+
+/// Update the program counter in a register snapshot.
+#[cfg(target_arch = "x86_64")]
+#[inline]
+fn set_pc(regs: &mut libc::user_regs_struct, pc: u64) {
+    regs.rip = pc;
+}
+
+#[cfg(target_arch = "aarch64")]
+#[inline]
+fn set_pc(regs: &mut libc::user_regs_struct, pc: u64) {
+    regs.pc = pc;
+}
+
+/// Read the syscall return value from a register snapshot.
+#[cfg(target_arch = "x86_64")]
+#[inline]
+fn get_return_value(regs: &libc::user_regs_struct) -> u64 {
+    regs.rax
+}
+
+#[cfg(target_arch = "aarch64")]
+#[inline]
+fn get_return_value(regs: &libc::user_regs_struct) -> u64 {
+    regs.regs[0]
+}
+
+/// Load syscall number and arguments into the register snapshot.
+///
+/// x86-64 Linux syscall ABI: syscall number in `rax`, args in
+/// `rdi`, `rsi`, `rdx`, `r10`, `r8`, `r9`.
+///
+/// aarch64 Linux syscall ABI: syscall number in `x8`, args in
+/// `x0`–`x5`.
+#[cfg(target_arch = "x86_64")]
+fn set_syscall_regs(regs: &mut libc::user_regs_struct, id: u64, args: &[u64]) -> Result<()> {
+    regs.rax = id;
+    for (index, arg) in args.iter().enumerate() {
+        match index {
+            0 => regs.rdi = *arg,
+            1 => regs.rsi = *arg,
+            2 => regs.rdx = *arg,
+            3 => regs.r10 = *arg,
+            4 => regs.r8 = *arg,
+            5 => regs.r9 = *arg,
+            _ => return Err(anyhow!("too many arguments for a syscall")),
+        }
+    }
+    Ok(())
+}
+
+#[cfg(target_arch = "aarch64")]
+fn set_syscall_regs(regs: &mut libc::user_regs_struct, id: u64, args: &[u64]) -> Result<()> {
+    regs.regs[8] = id;
+    for (index, arg) in args.iter().enumerate() {
+        if index < 6 {
+            regs.regs[index] = *arg;
+        } else {
+            return Err(anyhow!("too many arguments for a syscall"));
+        }
+    }
+    Ok(())
+}
+
+/// Syscall instruction encoded as a word for use with `PTRACE_POKETEXT`.
+///
+/// x86-64: `syscall` opcode = 0x0F 0x05 (2 bytes, fits in lowest bytes of an 8-byte word).
+/// aarch64: `svc #0` = 0xD4000001 (4 bytes, little-endian).
+#[cfg(target_arch = "x86_64")]
+const SYSCALL_INST: usize = 0x050f;
+
+#[cfg(target_arch = "aarch64")]
+const SYSCALL_INST: usize = 0xd4000001;
+
+/// Linux syscall numbers that vary between x86-64 and aarch64.
+///
+/// x86-64: https://github.com/torvalds/linux/blob/master/arch/x86/entry/syscalls/syscall_64.tbl
+/// aarch64: https://github.com/torvalds/linux/blob/master/include/uapi/asm-generic/unistd.h
+#[cfg(target_arch = "x86_64")]
+mod syscall_nr {
+    pub const MMAP: u64 = 9;
+    pub const MUNMAP: u64 = 11;
+    pub const CHDIR: u64 = 80;
+}
+
+#[cfg(target_arch = "aarch64")]
+mod syscall_nr {
+    pub const MMAP: u64 = 222;
+    pub const MUNMAP: u64 = 215;
+    pub const CHDIR: u64 = 49;
+}
+
+// ---------------------------------------------------------------------------
 
 // There should be only one PtraceManager in one thread. But as we don't implement TLS
 // , we cannot use thread-local variables safely.
@@ -195,11 +364,11 @@ impl Clone for TracedProcess {
 impl TracedProcess {
     #[instrument]
     fn protect(&self) -> Result<ThreadGuard> {
-        let regs = ptrace::getregs(Pid::from_raw(self.pid))?;
+        let regs = get_regs(Pid::from_raw(self.pid))?;
 
-        let rip = regs.rip;
+        let pc = get_pc(&regs);
         trace!("protecting regs: {:?}", regs);
-        let rip_ins = ptrace::read(Pid::from_raw(self.pid), rip as *mut libc::c_void)?;
+        let rip_ins = ptrace::read(Pid::from_raw(self.pid), pc as *mut libc::c_void)?;
 
         let guard = ThreadGuard {
             tid: self.pid,
@@ -227,37 +396,20 @@ impl TracedProcess {
         self.with_protect(|thread| -> Result<u64> {
             let pid = Pid::from_raw(thread.pid);
 
-            let mut regs = ptrace::getregs(pid)?;
-            let cur_ins_ptr = regs.rip;
+            let mut regs = get_regs(pid)?;
+            let cur_ins_ptr = get_pc(&regs);
 
-            regs.rax = id;
-            for (index, arg) in args.iter().enumerate() {
-                // All these registers are hard coded for x86 platform
-                if index == 0 {
-                    regs.rdi = *arg
-                } else if index == 1 {
-                    regs.rsi = *arg
-                } else if index == 2 {
-                    regs.rdx = *arg
-                } else if index == 3 {
-                    regs.r10 = *arg
-                } else if index == 4 {
-                    regs.r8 = *arg
-                } else if index == 5 {
-                    regs.r9 = *arg
-                } else {
-                    return Err(anyhow!("too many arguments for a syscall"));
-                }
-            }
+            set_syscall_regs(&mut regs, id, args)?;
             trace!("setting regs for pid: {:?}, regs: {:?}", pid, regs);
-            ptrace::setregs(pid, regs)?;
+            set_regs(pid, regs)?;
 
-            // We only support x86-64 platform now, so using hard coded `LittleEndian` here is ok.
+            // Write the architecture-specific syscall instruction at the current
+            // program counter so the traced thread executes exactly one syscall.
             unsafe {
                 ptrace::write(
                     pid,
                     cur_ins_ptr as *mut libc::c_void,
-                    0x050f as *mut libc::c_void,
+                    SYSCALL_INST as *mut libc::c_void,
                 )?
             };
             ptrace::step(pid, None)?;
@@ -271,11 +423,11 @@ impl TracedProcess {
                 }
             }
 
-            let regs = ptrace::getregs(pid)?;
+            let regs = get_regs(pid)?;
 
-            trace!("returned: {:?}", regs.rax);
+            trace!("returned: {:?}", get_return_value(&regs));
 
-            Ok(regs.rax)
+            Ok(get_return_value(&regs))
         })
     }
 
@@ -285,14 +437,14 @@ impl TracedProcess {
         let flags = MapFlags::MAP_PRIVATE | MapFlags::MAP_ANON;
 
         self.syscall(
-            9,
+            syscall_nr::MMAP,
             &[0, length, prot.bits() as u64, flags.bits() as u64, fd, 0],
         )
     }
 
     #[instrument]
     pub fn munmap(&self, addr: u64, len: u64) -> Result<u64> {
-        self.syscall(11, &[addr, len])
+        self.syscall(syscall_nr::MUNMAP, &[addr, len])
     }
 
     #[instrument(skip(f))]
@@ -314,7 +466,7 @@ impl TracedProcess {
         self.with_mmap(path.len() as u64, |process, addr| {
             process.write_mem(addr, path)?;
 
-            self.syscall(80, &[addr])?;
+            self.syscall(syscall_nr::CHDIR, &[addr])?;
             Ok(())
         })
     }
@@ -339,8 +491,8 @@ impl TracedProcess {
     pub fn run_codes<F: Fn(u64) -> Result<(u64, Vec<u8>)>>(&self, codes: F) -> Result<()> {
         let pid = Pid::from_raw(self.pid);
 
-        let regs = ptrace::getregs(pid)?;
-        let (_, ins) = codes(regs.rip)?; // generate codes to get length
+        let regs = get_regs(pid)?;
+        let (_, ins) = codes(get_pc(&regs))?; // generate codes to get length
 
         self.with_mmap(ins.len() as u64 + 16, |_, addr| {
             self.with_protect(|_| {
@@ -350,12 +502,12 @@ impl TracedProcess {
                 trace!("write instructions to addr: {:X}-{:X}", addr, end_addr);
                 self.write_mem(addr, &ins)?;
 
-                let mut regs = ptrace::getregs(pid)?;
+                let mut regs = get_regs(pid)?;
                 trace!("modify rip to addr: {:X}", addr + offset);
-                regs.rip = addr + offset;
-                ptrace::setregs(pid, regs)?;
+                set_pc(&mut regs, addr + offset);
+                set_regs(pid, regs)?;
 
-                let regs = ptrace::getregs(pid)?;
+                let regs = get_regs(pid)?;
                 info!("current registers: {:?}", regs);
 
                 loop {
@@ -367,7 +519,7 @@ impl TracedProcess {
                     info!("wait status: {:?}", status);
 
                     use nix::sys::signal::SIGTRAP;
-                    let regs = ptrace::getregs(pid)?;
+                    let regs = get_regs(pid)?;
 
                     info!("current registers: {:?}", regs);
                     match status {
@@ -409,11 +561,11 @@ impl Drop for ThreadGuard {
         unsafe {
             ptrace::write(
                 pid,
-                self.regs.rip as *mut libc::c_void,
+                get_pc(&self.regs) as *mut libc::c_void,
                 self.rip_ins as *mut libc::c_void,
             )
             .unwrap();
         }
-        ptrace::setregs(pid, self.regs).unwrap();
+        set_regs(pid, self.regs).unwrap();
     }
 }

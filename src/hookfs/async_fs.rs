@@ -251,7 +251,7 @@ impl<T: AsyncFileSystemImpl + 'static> Filesystem for AsyncFileSystem<T> {
         });
     }
 
-    fn getattr(&mut self, req: &Request, ino: u64, reply: ReplyAttr) {
+    fn getattr(&mut self, req: &Request, ino: u64, _fh: Option<u64>, reply: ReplyAttr) {
         let async_impl = self.0.clone();
         spawn_reply(
             req.unique(),

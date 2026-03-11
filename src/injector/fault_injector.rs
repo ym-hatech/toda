@@ -49,7 +49,7 @@ impl FaultInjector {
         let errnos: Vec<_> = conf
             .faults
             .iter()
-            .map(|item| (Errno::from_i32(item.errno), item.weight))
+            .map(|item| (Errno::from_raw(item.errno), item.weight))
             .collect();
 
         let sum = errnos.iter().fold(0, |acc, w| acc + w.1);

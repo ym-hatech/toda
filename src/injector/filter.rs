@@ -10,6 +10,7 @@ use tracing::{info, trace};
 use super::injector_config::FilterConfig;
 
 bitflags! {
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
     pub struct Method: u32 {
         const LOOKUP = 1;
         const FORGET = 1<<1;

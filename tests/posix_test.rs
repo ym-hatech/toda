@@ -11,13 +11,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::ffi::OsStr;
 use std::fs::{read_link, read_to_string, write, File, OpenOptions};
 use std::io::{Read, Write};
 use std::os::unix::fs::symlink;
 use std::path::PathBuf;
 use std::sync::{Arc, Once};
 
+use fuser::MountOption;
 use nix::sys::stat;
 use nix::{fcntl, unistd};
 use toda::hookfs;
@@ -49,18 +49,14 @@ fn init(name: &str) -> (PathBuf, fuser::BackgroundSession) {
 
     let fs = hookfs::AsyncFileSystem::from(hookfs);
 
-    let args = [
-        "allow_other",
-        "nonempty",
-        "fsname=toda",
-        "default_permissions",
+    let options = vec![
+        MountOption::AllowOther,
+        MountOption::CUSTOM("nonempty".to_string()),
+        MountOption::FSName("toda".to_string()),
+        MountOption::DefaultPermissions,
     ];
-    let flags: Vec<_> = args
-        .iter()
-        .flat_map(|item| vec![OsStr::new("-o"), OsStr::new(item)])
-        .collect();
 
-    let session = fuser::spawn_mount(fs, &test_path, &flags).unwrap();
+    let session = fuser::spawn_mount2(fs, &test_path, &options).unwrap();
     std::thread::sleep(std::time::Duration::from_secs(1));
     (test_path, session)
 }

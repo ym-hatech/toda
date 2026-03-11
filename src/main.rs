@@ -11,11 +11,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![feature(box_syntax)]
-#![feature(async_closure)]
-#![feature(vec_into_raw_parts)]
-#![feature(atomic_mut_ptr)]
-#![feature(drain_filter)]
 #![allow(clippy::or_fun_call)]
 #![allow(clippy::too_many_arguments)]
 
@@ -33,7 +28,7 @@ mod stop;
 mod utils;
 
 use std::convert::TryFrom;
-use std::os::unix::io::RawFd;
+use std::os::unix::io::{IntoRawFd, RawFd};
 use std::path::PathBuf;
 use std::sync::{mpsc, Mutex};
 use std::{io, thread};
@@ -42,8 +37,8 @@ use anyhow::Result;
 use injector::InjectorConfig;
 use jsonrpc::start_server;
 use mount_injector::{MountInjectionGuard, MountInjector};
+use nix::unistd::pipe;
 use nix::sys::signal::{signal, SigHandler, Signal};
-use nix::unistd::{pipe, read, write};
 use replacer::{Replacer, UnionReplacer};
 use structopt::StructOpt;
 use tokio::runtime::Runtime;
@@ -143,20 +138,31 @@ const SIGNAL_MSG: [u8; 6] = *b"SIGNAL";
 
 extern "C" fn signal_handler(_: libc::c_int) {
     unsafe {
-        write(SIGNAL_PIPE_WRITER, &SIGNAL_MSG).unwrap();
+        libc::write(
+            SIGNAL_PIPE_WRITER,
+            SIGNAL_MSG.as_ptr() as *const libc::c_void,
+            SIGNAL_MSG.len(),
+        );
     }
 }
 
 fn wait_for_signal(chan: RawFd) -> Result<()> {
     let mut buf = vec![0u8; 6];
-    read(chan, buf.as_mut_slice())?;
+    let ret = unsafe {
+        libc::read(chan, buf.as_mut_ptr() as *mut libc::c_void, buf.len())
+    };
+    if ret < 0 {
+        return Err(io::Error::last_os_error().into());
+    }
     Ok(())
 }
 
 fn main() -> Result<()> {
     let (reader, writer) = pipe()?;
+    let reader_fd: RawFd = reader.into_raw_fd();
+    let writer_fd: RawFd = writer.into_raw_fd();
     unsafe {
-        SIGNAL_PIPE_WRITER = writer;
+        SIGNAL_PIPE_WRITER = writer_fd;
     }
 
     unsafe { signal(Signal::SIGINT, SigHandler::Handler(signal_handler))? };
@@ -196,7 +202,7 @@ fn main() -> Result<()> {
         });
     }
     info!("waiting for signal to exit");
-    wait_for_signal(reader)?;
+    wait_for_signal(reader_fd)?;
     info!("start to recover and exit");
     if let Ok(v) = mount_injector {
         resume(option, v)?;

@@ -1,5 +1,4 @@
 use nix::errno::Errno;
-use nix::Error;
 use thiserror::Error;
 use tracing::error;
 
@@ -31,20 +30,13 @@ pub type Result<T> = std::result::Result<T, HookFsError>;
 
 impl HookFsError {
     pub fn last() -> HookFsError {
-        HookFsError::from(nix::Error::last())
+        HookFsError::Sys(Errno::last())
     }
 }
 
 impl From<nix::Error> for HookFsError {
-    fn from(err: Error) -> HookFsError {
-        // TODO: match more error types
-        match err {
-            Error::Sys(errno) => HookFsError::Sys(errno),
-            _ => {
-                error!("unknown error {:?}", err);
-                HookFsError::UnknownError
-            }
-        }
+    fn from(err: nix::Error) -> HookFsError {
+        HookFsError::Sys(err)
     }
 }
 
@@ -73,7 +65,7 @@ impl From<HookFsError> for libc::c_int {
         use HookFsError::*;
 
         match err {
-            Sys(errno) => errno as i32,
+            Sys(errno) => errno as libc::c_int,
             InodeNotFound { inode: _ } => libc::EFAULT,
             FhNotFound { fh: _ } => libc::EFAULT,
             UnknownFileType => libc::EINVAL,

@@ -4,7 +4,7 @@ mod reply;
 pub mod runtime;
 mod utils;
 
-use std::collections::{HashMap, LinkedList};
+use std::collections::{HashMap, VecDeque};
 use std::ffi::{CString, OsStr, OsString};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::io::RawFd;
@@ -19,11 +19,10 @@ use fuser::*;
 use libc::{c_void, lgetxattr, llistxattr, lremovexattr, lsetxattr};
 use nix::dir;
 use nix::errno::Errno;
-use nix::fcntl::{open, readlink, renameat, OFlag};
+use nix::fcntl::{open, readlink, renameat, AtFlags, OFlag};
 use nix::sys::{stat, statfs};
 use nix::unistd::{
-    close, fchownat, fsync, linkat, mkdir, symlinkat, truncate, unlink, AccessFlags, FchownatFlags,
-    Gid, LinkatFlags, Uid,
+    close, fchownat, fsync, linkat, mkdir, symlinkat, truncate, unlink, AccessFlags, Gid, Uid,
 };
 pub use reply::Reply;
 use reply::*;
@@ -159,7 +158,7 @@ pub struct HookFs {
 struct Node {
     pub ref_count: u64,
     // TODO: optimize paths with a combination data structure
-    paths: LinkedList<PathBuf>,
+    paths: VecDeque<PathBuf>,
 }
 
 impl Node {
@@ -178,7 +177,7 @@ impl Node {
     }
 
     fn remove(&mut self, path: &Path) {
-        self.paths.drain_filter(|x| x == path);
+        self.paths.retain(|x| x != path);
     }
 }
 
@@ -324,7 +323,7 @@ impl HookFs {
 
         // TODO: create a standalone runtime only for interrupt is too ugly.
         //       this RWLock is actually redundant, and the injector is rarely written.
-        let mut rt  = tokio::runtime::Runtime::new().unwrap();
+        let rt  = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
             let injector = self.injector.read().await;
             injector.interrupt();
@@ -702,7 +701,7 @@ impl AsyncFileSystemImpl for HookFs {
                 &original_path,
                 None,
                 &new_path_clone,
-                LinkatFlags::NoSymlinkFollow,
+                AtFlags::AT_SYMLINK_NOFOLLOW,
             )
         })
         .await??;
@@ -1239,7 +1238,7 @@ async fn async_lchown(path: &Path, uid: Option<u32>, gid: Option<u32>) -> Result
             &path_clone,
             uid.map(Uid::from_raw),
             gid.map(Gid::from_raw),
-            FchownatFlags::NoFollowSymlink,
+            AtFlags::AT_SYMLINK_NOFOLLOW,
         )
     })
     .await??;

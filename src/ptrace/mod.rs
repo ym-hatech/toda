@@ -45,7 +45,7 @@ fn get_regs(pid: Pid) -> Result<libc::user_regs_struct> {
     };
     let ret = unsafe {
         libc::ptrace(
-            libc::PTRACE_GETREGSET as libc::c_int,
+            libc::PTRACE_GETREGSET as libc::c_uint,
             pid.as_raw(),
             libc::NT_PRSTATUS as usize as *mut libc::c_void,
             &mut iov as *mut libc::iovec as *mut libc::c_void,
@@ -72,7 +72,7 @@ fn set_regs(pid: Pid, regs: libc::user_regs_struct) -> Result<()> {
     };
     let ret = unsafe {
         libc::ptrace(
-            libc::PTRACE_SETREGSET as libc::c_int,
+            libc::PTRACE_SETREGSET as libc::c_uint,
             pid.as_raw(),
             libc::NT_PRSTATUS as usize as *mut libc::c_void,
             &mut iov as *mut libc::iovec as *mut libc::c_void,

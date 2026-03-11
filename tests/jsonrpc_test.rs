@@ -47,7 +47,7 @@ fn test_should_not_update_config_if_status_is_failed() {
 fn test_should_fail_if_config_is_bad() {
     let (tx, _rx) = channel();
     let request = r#"{"jsonrpc": "2.0","method":"update","params":[["blah"]],"id":1}"#;
-    let response = r#"{"jsonrpc":"2.0","error":{"code":-32602,"message":"Invalid params: invalid type: string \"blah\", expected internally tagged enum."},"id":1}"#;
+    let response = r#"{"jsonrpc":"2.0","error":{"code":-32602,"message":"Invalid params: invalid type: string \"blah\", expected internally tagged enum InjectorConfig."},"id":1}"#;
     let io = new_handler(jsonrpc::RpcImpl::new(
         Mutex::new(Ok(())),
         Mutex::new(tx),

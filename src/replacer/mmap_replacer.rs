@@ -303,7 +303,7 @@ fn build_mmap_replace_code(
         ; adr x1, ->new_paths    // x1 = base of new_paths
         ; ldr x9, [x16, 32]      // x9 = new_path_offset (RawReplaceCase+32)
         ; add x1, x1, x9         // x1 = &new_paths[new_path_offset]
-        ; mov x2, libc::O_RDWR   // x2 = O_RDWR
+        ; mov x2, libc::O_RDWR as u64   // x2 = O_RDWR
         ; mov x3, xzr            // x3 = mode = 0
         ; mov x8, 56             // x8 = openat syscall number (56 on aarch64)
         ; svc 0
